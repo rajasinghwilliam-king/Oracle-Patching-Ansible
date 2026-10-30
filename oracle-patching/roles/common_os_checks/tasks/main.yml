@@ -1,0 +1,50 @@
+---
+- name: "PC-01 Assert certified kernel version"
+  ansible.builtin.assert:
+    that:
+      - ansible_kernel is version(required_kernel, '>=')
+    fail_msg: "Kernel {{ ansible_kernel }} is below required {{ required_kernel }}."
+
+- name: "PC-02 Assert certified operating system"
+  ansible.builtin.assert:
+    that:
+      - (ansible_distribution ~ ' ' ~ ansible_distribution_major_version) in os_certified
+    fail_msg: "{{ ansible_distribution }} {{ ansible_distribution_major_version }} is not certified."
+
+- name: "PC-03 Verify required RPM packages"
+  ansible.builtin.command:
+    argv: [rpm, -q, "{{ item }}"]
+  loop: "{{ required_packages }}"
+  register: required_rpm_results
+  changed_when: false
+  failed_when: required_rpm_results.rc != 0
+
+- name: "PC-09 Verify non-interactive sudo privileges"
+  ansible.builtin.command:
+    argv: [sudo, -n, -l, -U, "{{ item }}"]
+  loop:
+    - "{{ home.owner }}"
+    - root
+  register: sudo_check_results
+  changed_when: false
+  failed_when: sudo_check_results.rc != 0
+
+- name: "PC-04..07 Check free filesystem space"
+  ansible.builtin.shell: |
+    set -o pipefail
+    check_path={{ item.path | quote }}
+    while [ ! -e "$check_path" ] && [ "$check_path" != / ]; do check_path=$(dirname "$check_path"); done
+    df -B1 --output=avail "$check_path" | tail -n 1 | tr -d ' '
+  args:
+    executable: /bin/bash
+  loop: "{{ space_checks }}"
+  register: free_space_results
+  changed_when: false
+  failed_when: free_space_results.rc != 0
+
+- name: "PC-04..07 Assert minimum free space"
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | int) >= (item.item.min_gb | int * 1073741824)
+    fail_msg: "{{ item.item.path }} has insufficient free space; minimum is {{ item.item.min_gb }} GiB."
+  loop: "{{ free_space_results.results }}"

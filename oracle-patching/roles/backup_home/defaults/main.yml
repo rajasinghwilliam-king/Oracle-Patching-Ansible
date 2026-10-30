@@ -1,0 +1,3 @@
+---
+# out_of_place remains disabled until the home clone procedure is automated.
+backup_method: "{{ home.backup_method }}"

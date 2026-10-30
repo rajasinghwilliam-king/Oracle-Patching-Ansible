@@ -1,0 +1,87 @@
+---
+- name: Load home and patch catalog
+  ansible.builtin.import_playbook: tasks/load_home.yml
+
+- name: Validate rollback authorization
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require explicit rollback confirmation and source run
+      ansible.builtin.assert:
+        that:
+          - rollback_confirm | default(false) | bool
+          - rollback_patch_ids is defined
+          - rollback_patch_ids | length > 0
+          - rollback_from_run_id is defined
+          - rollback_from_run_id | length > 0
+        fail_msg: Rollback requires rollback_confirm=true, patch IDs, and rollback_from_run_id.
+
+- name: Roll back GI home
+  hosts: home_nodes
+  become: true
+  any_errors_fatal: true
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Prepare node run variables
+      ansible.builtin.import_tasks: tasks/run_setup.yml
+  tasks:
+    - name: Roll back GI patch once per cluster
+      ansible.builtin.command:
+        argv:
+          - "{{ home.home_path }}/OPatch/opatchauto"
+          - rollback
+          - "{{ bundle_repo }}/{{ rollback_patch_ids[0] }}"
+          - "-oh"
+          - "{{ home.home_path }}"
+      become_user: "{{ home.owner }}"
+      run_once: true
+      changed_when: true
+      when: home.type == 'gi'
+
+- name: Roll back RDBMS home one node at a time
+  hosts: home_nodes
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Prepare node run variables
+      ansible.builtin.import_tasks: tasks/run_setup.yml
+  tasks:
+    - name: Stop affected database instance
+      ansible.builtin.command:
+        argv: [srvctl, stop, instance, -db, "{{ item }}", -instance, "{{ item }}{{ node_index | default(1) }}", -stopoption, IMMEDIATE]
+      become_user: "{{ home.owner }}"
+      loop: "{{ home.databases | default([]) }}"
+      changed_when: true
+      when: home.type == 'rdbms'
+
+    - name: Roll back listed patch IDs
+      ansible.builtin.command:
+        argv: ["{{ home.home_path }}/OPatch/opatch", rollback, -id, "{{ item }}", -silent]
+      args:
+        chdir: "{{ home.home_path }}"
+      become_user: "{{ home.owner }}"
+      loop: "{{ rollback_patch_ids }}"
+      changed_when: true
+      when: home.type == 'rdbms'
+
+    - name: Start affected database instance
+      ansible.builtin.command:
+        argv: [srvctl, start, instance, -db, "{{ item }}", -instance, "{{ item }}{{ node_index | default(1) }}"]
+      become_user: "{{ home.owner }}"
+      loop: "{{ home.databases | default([]) }}"
+      changed_when: true
+      when: home.type == 'rdbms'
+
+- name: Run datapatch rollback once
+  hosts: home_nodes
+  become: true
+  tasks:
+    - name: Run datapatch in rollback mode
+      ansible.builtin.command:
+        argv: ["{{ home.home_path }}/OPatch/datapatch", -verbose]
+      become_user: "{{ home.owner }}"
+      run_once: true
+      changed_when: true
+      when: home.type == 'rdbms'

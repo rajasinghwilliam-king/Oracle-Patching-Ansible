@@ -1,0 +1,89 @@
+---
+- name: Refuse unsupported out-of-place backup
+  ansible.builtin.fail:
+    msg: out_of_place backup is refused until the Oracle home clone procedure is automated.
+  when: backup_method == 'out_of_place'
+
+- name: Ensure backup directory exists
+  ansible.builtin.file:
+    path: "{{ run_backup_dir }}"
+    state: directory
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0770"
+
+- name: Check backup completion marker
+  ansible.builtin.stat:
+    path: "{{ run_state_dir }}/backup.done"
+  register: backup_marker
+
+- name: Capture current Oracle inventory
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -all]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: backup_inventory
+  changed_when: false
+  when: not backup_marker.stat.exists
+
+- name: Save backup inventory
+  ansible.builtin.copy:
+    content: "{{ backup_inventory.stdout }}\n"
+    dest: "{{ run_backup_dir }}/inventory_pre_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  when: not backup_marker.stat.exists
+
+- name: Create verified tar backup
+  ansible.builtin.shell: |
+    set -o pipefail
+    tar -C {{ home.home_path | dirname | quote }} \
+      --exclude='*/log/*' --exclude='*/diag/*' \
+      -cf - {{ home.home_path | basename | quote }} | gzip > {{ (run_backup_dir ~ '/' ~ target_home ~ '_' ~ run_id_eff ~ '.tar.gz') | quote }}
+  args:
+    executable: /bin/bash
+    creates: "{{ run_backup_dir }}/{{ target_home }}_{{ run_id_eff }}.tar.gz"
+  become_user: "{{ home.owner }}"
+  when:
+    - not backup_marker.stat.exists
+    - backup_method == 'tar'
+
+- name: Create LVM snapshot backup
+  ansible.builtin.command:
+    argv:
+      - lvcreate
+      - --snapshot
+      - --name
+      - "{{ home.lvm.snapshot_name }}"
+      - --size
+      - "{{ home.lvm.snapshot_size }}"
+      - "{{ home.lvm.logical_volume }}"
+  register: lvm_snapshot_result
+  changed_when: lvm_snapshot_result.rc == 0
+  when:
+    - not backup_marker.stat.exists
+    - backup_method == 'lvm_snapshot'
+
+- name: Create and verify tar SHA-256 manifest
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd {{ run_backup_dir | quote }}
+    sha256sum {{ (target_home ~ '_' ~ run_id_eff ~ '.tar.gz') | quote }} > SHA256SUMS
+    sha256sum -c SHA256SUMS
+  args:
+    executable: /bin/bash
+  register: backup_checksum
+  changed_when: backup_checksum.rc == 0
+  when:
+    - not backup_marker.stat.exists
+    - backup_method == 'tar'
+
+- name: Write backup completion marker
+  ansible.builtin.copy:
+    content: "{{ run_id_eff }}\n"
+    dest: "{{ run_state_dir }}/backup.done"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  when: not backup_marker.stat.exists

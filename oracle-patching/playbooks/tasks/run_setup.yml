@@ -1,0 +1,30 @@
+---
+- name: Calculate node-specific Oracle environment
+  ansible.builtin.set_fact:
+    node_index: "{{ home.hosts.index(inventory_hostname) + 1 }}"
+    oracle_env:
+      ORACLE_HOME: "{{ home.home_path }}"
+      PATH: "{{ home.home_path }}/bin:/usr/local/bin:/usr/bin:/bin"
+
+- name: Build database and instance pairs
+  ansible.builtin.set_fact:
+    db_pairs: "{{ db_pairs | default([]) + [{'db': item, 'inst': (item ~ (node_index | string) if home.rac | default(false) else item)}] }}"
+  loop: "{{ home.databases | default([]) }}"
+
+- name: Create run folders
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0775"
+  loop:
+    - "{{ run_dir }}"
+    - "{{ run_dir }}/prechecks"
+    - "{{ run_dir }}/inventory"
+    - "{{ run_dir }}/sql"
+    - "{{ run_dir }}/tools"
+    - "{{ run_dir }}/stages"
+    - "{{ run_state_dir }}"
+    - "{{ run_stage_dir }}"
+    - "{{ run_stage_dir }}/sql"

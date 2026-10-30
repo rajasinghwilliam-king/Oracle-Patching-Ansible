@@ -1,0 +1,17 @@
+---
+state_root: /var/lib/oracle-patching/state
+log_root: /var/log/oracle-patching
+stage_root: /stage/oracle-patching
+backup_root: /backup/oracle-patching
+archive_server: archive01.example.com
+archive_root: /archive/oracle-patching
+bundle_repo: /mnt/patch_repo/19.x/2026Q3
+oracle_group: oinstall
+drain_timeout_sec: 600
+notify_list:
+  - dba-team@example.com
+mail_sender: oracle-patching@example.com
+smtp_host: smtp.example.com
+chatops_webhook: "{{ vault_chatops_webhook | default('') }}"
+smoke_user: "{{ vault_smoke_user | default('') }}"
+smoke_password: "{{ vault_smoke_password | default('') }}"

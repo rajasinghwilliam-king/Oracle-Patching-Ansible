@@ -1,0 +1,184 @@
+---
+- name: Copy SQL check scripts to staging
+  ansible.builtin.copy:
+    src: "{{ playbook_dir | dirname }}/files/sql/{{ item }}"
+    dest: "{{ run_stage_dir }}/sql/{{ item }}"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  loop:
+    - db_pre_checks.sql
+    - db_post_checks.sql
+    - smoke_test.sql
+
+- name: "PC-11 Inspect database inventory"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -detail]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: db_inventory
+  changed_when: false
+  failed_when: db_inventory.rc != 0 or 'OPatch failed' in db_inventory.stdout
+
+- name: Save database precheck inventory
+  ansible.builtin.copy:
+    content: "{{ db_inventory.stdout }}\n"
+    dest: "{{ run_dir }}/inventory/inventory_pre_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+
+- name: Read database OPatch version
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", version]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: db_opatch_version
+  changed_when: false
+
+- name: "PC-13 Assert minimum OPatch version"
+  ansible.builtin.assert:
+    that:
+      - (db_opatch_version.stdout | regex_search('OPatch Version: ([0-9.]+)', '\\1') | first) is version(patch_catalog.patches[item.value].min_opatch, '>=')
+  loop: "{{ home.patch_ids | dict2items }}"
+
+- name: "PC-15 Check patch applicability"
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/OPatch/opatch"
+      - prereq
+      - CheckApplicable
+      - -phBaseDir
+      - "{{ run_stage_dir }}/{{ item.value }}"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  loop: "{{ home.patch_ids | dict2items }}"
+  register: db_applicability
+  changed_when: false
+  failed_when: false
+
+- name: "PC-15 Assert patch applicability"
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: "Patch applicability check failed: {{ item.item.value }}"
+  loop: "{{ db_applicability.results }}"
+
+- name: "PC-16 Check conflicts against the Oracle home"
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/OPatch/opatch"
+      - prereq
+      - CheckConflictAgainstOHWithDetail
+      - -phBaseDir
+      - "{{ run_stage_dir }}/{{ item.value }}"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  loop: "{{ home.patch_ids | dict2items }}"
+  register: db_conflicts
+  changed_when: false
+  failed_when: db_conflicts.rc != 0
+
+- name: Run database SQL prechecks per local instance
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/bin/sqlplus"
+      - -S
+      - -L
+      - / as sysdba
+      - "@{{ run_stage_dir }}/sql/db_pre_checks.sql"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env | combine({'ORACLE_SID': item.inst}) }}"
+  loop: "{{ db_pairs }}"
+  register: db_sql_prechecks
+  changed_when: false
+  failed_when: db_sql_prechecks.rc != 0 or 'ORA-' in db_sql_prechecks.stdout or 'SP2-' in db_sql_prechecks.stdout
+
+- name: Save SQL precheck output per instance
+  ansible.builtin.copy:
+    content: "{{ item.stdout }}\n"
+    dest: "{{ run_dir }}/sql/db_pre_{{ item.item.inst }}_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  loop: "{{ db_sql_prechecks.results }}"
+
+- name: Parse SQL precheck values
+  ansible.builtin.set_fact:
+    db_pre_lines: "{{ (db_pre_lines | default({})) | combine({item.item.inst: item.stdout_lines | parse_sql_kv}) }}"
+  loop: "{{ db_sql_prechecks.results }}"
+
+- name: "PC-21..31 Assert database health per instance"
+  ansible.builtin.assert:
+    that:
+      - db_pre_lines[item.inst].DB_STATE[0] in ['READ WRITE', 'READ ONLY WITH APPLY']
+      - db_pre_lines[item.inst].INSTANCE[1] == 'OPEN'
+      - db_pre_lines[item.inst].ACTIVE_SESSIONS[0] | int <= max_active_sessions | int
+      - (db_pre_lines[item.inst].OPEN_TXNS[0] | int == 0) or (allow_open_txns | bool)
+      - db_pre_lines[item.inst].TBS_MAX_USED_PCT[0] | float < tablespace_max_used_pct | float
+      - db_pre_lines[item.inst].FRA_USED_PCT[0] | float < fra_max_used_pct | float
+      - db_pre_lines[item.inst].REGISTRY_BAD[0] | int == 0
+      - db_pre_lines[item.inst].LAST_BACKUP_HRS[0] | float >= 0
+      - db_pre_lines[item.inst].LAST_BACKUP_HRS[0] | float <= max_backup_age_hours | float
+      - (db_pre_lines[item.inst].DB_STATE[1] != 'PHYSICAL STANDBY') or (db_pre_lines[item.inst].APPLY_LAG_SEC[0] | float <= max_apply_lag_seconds | float)
+      - db_pre_lines[item.inst].INVALID_BASELINE[0] | int <= max_invalid_objects | int
+    fail_msg: "Database precheck thresholds failed for {{ item.inst }}."
+  loop: "{{ db_pairs }}"
+
+- name: Record invalid object baseline
+  ansible.builtin.set_fact:
+    invalid_baseline: "{{ (invalid_baseline | default({})) | combine({item.inst: db_pre_lines[item.inst].INVALID_BASELINE[0] | int}) }}"
+  loop: "{{ db_pairs }}"
+
+- name: Scan alert log for ORA errors as a warning
+  ansible.builtin.shell: |
+    set -o pipefail
+    find {{ (home.home_path | regex_replace('/product/.*$', '') ~ '/diag') | quote }} -type f -name 'alert_*.log' -print0 | \
+      xargs -0 -r grep -H 'ORA-' | tail -n 100 || true
+  args:
+    executable: /bin/bash
+  become_user: "{{ home.owner }}"
+  register: db_alert_scan
+  changed_when: false
+
+- name: Record alert log warning
+  ansible.builtin.set_fact:
+    stage_warnings: "{{ stage_warnings | default([]) + ['Alert log contains ORA- entries; review ' ~ run_dir ~ '/tools/alert_scan.txt'] }}"
+  when: db_alert_scan.stdout | length > 0
+
+- name: Save alert log scan
+  ansible.builtin.copy:
+    content: "{{ db_alert_scan.stdout }}\n"
+    dest: "{{ run_dir }}/tools/alert_scan.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+
+- name: "PC-32 Verify database listener status"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/lsnrctl", status]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: db_listener
+  changed_when: false
+  failed_when: db_listener.rc != 0 or 'TNS-' in db_listener.stdout
+
+- name: "PC-33 Verify database resource status"
+  ansible.builtin.command:
+    argv: [srvctl, status, database, -db, "{{ item }}"]
+  become_user: "{{ home.owner }}"
+  loop: "{{ home.databases }}"
+  run_once: true
+  register: db_resource_status
+  changed_when: false
+  failed_when: db_resource_status.rc != 0
+
+- name: "PC-34 Verify Data Guard broker configuration"
+  ansible.builtin.command:
+    argv: [dgmgrl, -silent, /, show, configuration]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: db_dg_status
+  changed_when: false
+  failed_when: db_dg_status.rc != 0 or 'SUCCESS' not in db_dg_status.stdout
+  when: home.dg_protected | default(false)

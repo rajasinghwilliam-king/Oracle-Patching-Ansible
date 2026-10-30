@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Oracle patch run {{ run_id_eff }}</title>
+  <style>
+    body { font: 14px/1.45 sans-serif; margin: 2rem; color: #202a31; }
+    h1, h2 { color: #174b53; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; }
+    th, td { border: 1px solid #b8c4c8; padding: .5rem; text-align: left; vertical-align: top; }
+    th { background: #e8eff0; }
+    .FAILED { color: #a32121; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>Oracle patch run {{ run_id_eff }}</h1>
+  <p>Change: {{ change_ref }} | Home: {{ target_home }} | Mode: {{ mode }}</p>
+  <h2>Per-host stage status</h2>
+  <table>
+    <thead><tr><th>Host</th><th>Stage</th><th>Status</th><th>Finished (UTC)</th></tr></thead>
+    <tbody>
+    {% for host_report in report_hosts | default([]) %}
+      <tr><td>{{ host_report.host }}</td><td>{{ host_report.stage }}</td><td class="{{ host_report.status }}">{{ host_report.status }}</td><td>{{ host_report.finished_utc }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <h2>Checks</h2>
+  <table>
+    <thead><tr><th>Host</th><th>Check</th><th>Result</th></tr></thead>
+    <tbody>
+    {% for host_report in report_hosts | default([]) %}
+      {% for check in host_report.checks | default([]) %}
+        <tr><td>{{ host_report.host }}</td><td>{{ check.name | default(check.id | default('Check')) }}</td><td>{{ check.result | default(check.status | default('Recorded')) }}</td></tr>
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+  <h2>Warnings</h2>
+  <ul>
+  {% for host_report in report_hosts | default([]) %}
+    {% for warning in host_report.warnings | default([]) %}<li>{{ host_report.host }}: {{ warning }}</li>{% endfor %}
+  {% endfor %}
+  </ul>
+</body>
+</html>

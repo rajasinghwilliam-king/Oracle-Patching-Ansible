@@ -1,0 +1,33 @@
+{
+  "folders": [
+    {
+      "name": "Oracle Patching (Ansible)",
+      "path": "oracle-patching"
+    }
+  ],
+  "settings": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "files.exclude": {
+      "**/.venv": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true
+    },
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": ["tests"],
+    "files.associations": {
+      "*.j2": "jinja-html",
+      "*.sql": "sql"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "redhat.ansible",
+      "redhat.vscode-yaml",
+      "ms-python.python",
+      "editorconfig.editorconfig"
+    ]
+  }
+}

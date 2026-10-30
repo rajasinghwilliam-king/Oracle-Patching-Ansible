@@ -1,0 +1,78 @@
+---
+- name: Load selected Oracle home and patch catalogs
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Load environment-wide settings
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir | dirname }}/inventories/{{ env | default('nonprod') }}/group_vars/all.yml"
+
+    - name: Resolve catalog paths
+      ansible.builtin.set_fact:
+        catalog_file: >-
+          {{ (playbook_dir | dirname) ~ '/inventories/' ~
+          (env | default('nonprod')) ~ '/group_vars/oracle_homes.yml' }}
+        patch_catalog_file: "{{ playbook_dir | dirname }}/catalog/patches.yml"
+
+    - name: Load home catalog
+      ansible.builtin.include_vars:
+        file: "{{ catalog_file }}"
+
+    - name: Load patch catalog
+      ansible.builtin.include_vars:
+        file: "{{ patch_catalog_file }}"
+        name: patch_catalog
+
+    - name: Validate survey inputs
+      ansible.builtin.assert:
+        that:
+          - target_home is defined
+          - mode | default('') in ['precheck_only', 'patch', 'rollback']
+          - (change_ref | default('')) is match('^CHG[0-9]+$')
+        fail_msg: Survey inputs must include target_home, a valid mode, and change_ref matching CHG followed by digits.
+
+    - name: Select exactly one home catalog entry
+      ansible.builtin.set_fact:
+        selected_homes: "{{ oracle_homes | dict2items | selectattr('key', 'equalto', target_home) | list }}"
+
+    - name: Assert selected home exists exactly once
+      ansible.builtin.assert:
+        that:
+          - selected_homes | length == 1
+        fail_msg: "target_home '{{ target_home }}' must match exactly one catalog entry."
+
+    - name: Set selected home and effective run identifiers
+      ansible.builtin.set_fact:
+        home: "{{ selected_homes[0].value }}"
+        run_id_eff: >-
+          {{ (run_id | default('', true)) if (run_id | default('', true) | length > 0)
+          else change_ref ~ '-' ~ lookup('pipe', 'date -u +%Y%m%d-%H%M') }}
+
+    - name: Define run directories
+      ansible.builtin.set_fact:
+        run_dir: "{{ log_root }}/{{ home.name | default(target_home) }}/{{ run_id_eff }}"
+        run_state_dir: "{{ state_root }}/{{ target_home }}/{{ run_id_eff }}"
+        run_stage_dir: "{{ stage_root }}/{{ target_home }}/{{ run_id_eff }}"
+        run_backup_dir: "{{ backup_root }}/{{ target_home }}/{{ run_id_eff }}"
+
+    - name: Add selected nodes to the run group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: home_nodes
+        home: "{{ home | combine({'name': target_home}) }}"
+        run_id_eff: "{{ run_id_eff }}"
+        run_dir: "{{ run_dir }}"
+        run_state_dir: "{{ run_state_dir }}"
+        run_stage_dir: "{{ run_stage_dir }}"
+        run_backup_dir: "{{ run_backup_dir }}"
+        patch_catalog: "{{ patch_catalog }}"
+        allow_open_txns: "{{ allow_open_txns | default(false) }}"
+        recompile_invalid: "{{ home.recompile_invalid | default(false) }}"
+      loop: "{{ home.hosts }}"
+
+    - name: Send workflow start notification
+      ansible.builtin.include_role:
+        name: notify
+      vars:
+        notify_status: STARTED
+        notify_message: "Started {{ mode }} for {{ target_home }} ({{ change_ref }}, run {{ run_id_eff }})."

@@ -1,0 +1,70 @@
+---
+- name: Build stage report document
+  ansible.builtin.set_fact:
+    stage_doc:
+      run_id_eff: "{{ run_id_eff }}"
+      change_ref: "{{ change_ref }}"
+      target_home: "{{ target_home }}"
+      mode: "{{ mode }}"
+      host: "{{ inventory_hostname }}"
+      stage: "{{ stage_name }}"
+      status: "{{ report_status | default('COMPLETED') }}"
+      finished_utc: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+      warnings: "{{ stage_warnings | default([]) }}"
+      checks: "{{ stage_checks | default([]) }}"
+
+- name: Write stage JSON report
+  ansible.builtin.copy:
+    content: "{{ stage_doc | to_nice_json }}\n"
+    dest: "{{ run_dir }}/{{ 'prechecks' if stage_name.startswith('precheck') else 'stages' }}/{{ stage_name }}_{{ inventory_hostname }}.json"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+
+- name: Collect current stage reports from all hosts
+  ansible.builtin.set_fact:
+    report_hosts: >-
+      {{ ansible_play_hosts | map('extract', hostvars) |
+      selectattr('stage_doc', 'defined') | map(attribute='stage_doc') | list }}
+  run_once: true
+
+- name: Write consolidated JSON report
+  ansible.builtin.copy:
+    content: >-
+      {{ {'run_id_eff': run_id_eff, 'change_ref': change_ref, 'target_home': target_home, 'mode': mode, 'hosts': report_hosts | default([])} | to_nice_json }}
+    dest: "{{ run_dir }}/report_{{ run_id_eff }}.json"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  run_once: true
+
+- name: Render consolidated HTML report
+  ansible.builtin.template:
+    src: run_report.html.j2
+    dest: "{{ run_dir }}/report_{{ run_id_eff }}.html"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  run_once: true
+
+- name: Generate run directory checksum manifest
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd {{ run_dir | quote }}
+    find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
+  args:
+    executable: /bin/bash
+  register: run_manifest
+  changed_when: run_manifest.rc == 0
+  run_once: true
+
+- name: Archive reports to central server
+  ansible.builtin.command:
+    argv:
+      - rsync
+      - -a
+      - --mkpath
+      - "{{ run_dir }}/"
+      - "{{ archive_server }}:{{ archive_root }}/{{ change_ref }}/{{ run_id_eff }}/{{ inventory_hostname }}/"
+  register: archive_result
+  changed_when: archive_result.rc == 0

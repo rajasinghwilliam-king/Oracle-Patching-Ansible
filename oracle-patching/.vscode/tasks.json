@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "targetHome",
+      "type": "promptString",
+      "description": "Catalog home name",
+      "default": "gi_nonprod_cluster01"
+    },
+    {
+      "id": "changeRef",
+      "type": "promptString",
+      "description": "Change reference (CHG followed by digits)",
+      "default": "CHG123456"
+    },
+    {
+      "id": "env",
+      "type": "pickString",
+      "description": "Inventory environment",
+      "options": ["nonprod", "prod"],
+      "default": "nonprod"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Setup: create venv and install dependencies",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "cd \"$(wslpath -u '${workspaceFolder}')\" && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/ansible-galaxy collection install -r requirements.yml"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Check: syntax of all playbooks",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "cd \"$(wslpath -u '${workspaceFolder}')\" && for playbook in precheck_only gi_patch rdbms_patch rollback; do .venv/bin/ansible-playbook playbooks/${playbook}.yml --syntax-check || exit $?; done"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Check: lint playbooks and roles",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "cd \"$(wslpath -u '${workspaceFolder}')\" && .venv/bin/ansible-lint playbooks roles"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: unit tests for filters",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "cd \"$(wslpath -u '${workspaceFolder}')\" && .venv/bin/pytest tests -q"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: read-only pre-checks",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "cd \"$(wslpath -u '${workspaceFolder}')\" && .venv/bin/ansible-playbook -i inventories/${input:env}/hosts.yml playbooks/precheck_only.yml -e env=${input:env} -e target_home=${input:targetHome} -e change_ref=${input:changeRef} -e mode=precheck_only"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: patch workflow",
+      "type": "shell",
+      "command": "wsl.exe",
+      "args": ["--", "bash", "-lc", "echo 'Patch runs must be launched from AAP.'; exit 1"],
+      "problemMatcher": []
+    }
+  ]
+}

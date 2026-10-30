@@ -1,0 +1,111 @@
+---
+- name: "PC-11 Inspect GI inventory"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -detail]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_inventory
+  changed_when: false
+  failed_when: gi_inventory.rc != 0 or 'OPatch failed' in gi_inventory.stdout
+
+- name: Save GI precheck inventory
+  ansible.builtin.copy:
+    content: "{{ gi_inventory.stdout }}\n"
+    dest: "{{ run_dir }}/inventory/inventory_pre_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+
+- name: Read OPatch version
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", version]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_opatch_version
+  changed_when: false
+
+- name: "PC-13 Assert minimum OPatch version"
+  ansible.builtin.assert:
+    that:
+      - (gi_opatch_version.stdout | regex_search('OPatch Version: ([0-9.]+)', '\\1') | first) is version(patch_catalog.patches[item.value].min_opatch, '>=')
+  loop: "{{ home.patch_ids | dict2items }}"
+
+- name: "PC-15 Analyze GI patch applicability"
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/OPatch/opatchauto"
+      - apply
+      - "{{ run_stage_dir }}/{{ home.patch_ids.gi_ru }}"
+      - -analyze
+      - -oh
+      - "{{ home.home_path }}"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  run_once: true
+  register: gi_analyze
+  changed_when: false
+  failed_when: gi_analyze.rc != 0
+
+- name: "PC-16 Check GI patch conflicts"
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/OPatch/opatch"
+      - prereq
+      - CheckConflictAgainstOHWithDetail
+      - -phBaseDir
+      - "{{ run_stage_dir }}/{{ home.patch_ids.gi_ru }}"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  run_once: true
+  register: gi_conflict
+  changed_when: false
+  failed_when: gi_conflict.rc != 0
+
+- name: "PC-18 Verify cluster resources are online"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/crsctl", check, cluster, -all]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  run_once: true
+  register: gi_cluster_status
+  changed_when: false
+  failed_when: gi_cluster_status.rc != 0 or 'is online' not in gi_cluster_status.stdout
+
+- name: "PC-19 Verify all ASM disk groups are mounted"
+  ansible.builtin.shell: |
+    set -o pipefail
+    {{ home.home_path }}/bin/asmcmd lsdg | awk 'NR > 1 && $1 != "MOUNTED" { count++ } END { print count + 0 }'
+  args:
+    executable: /bin/bash
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env | combine({'ORACLE_SID': '+ASM' ~ (node_index | string)}) }}"
+  register: gi_unmounted_diskgroups
+  changed_when: false
+  failed_when: gi_unmounted_diskgroups.rc != 0 or gi_unmounted_diskgroups.stdout | int != 0
+
+- name: "PC-20 Verify OCR and voting disks"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/ocrcheck"]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_ocrcheck
+  changed_when: false
+  failed_when: gi_ocrcheck.rc != 0 or 'succeeded' not in gi_ocrcheck.stdout
+
+- name: "PC-20 Verify voting disk query"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/crsctl", query, css, votedisk]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_votedisk
+  changed_when: false
+  failed_when: gi_votedisk.rc != 0
+
+- name: "PC-32 Verify GI listener status"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/lsnrctl", status]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_listener
+  changed_when: false
+  failed_when: gi_listener.rc != 0 or 'TNS-' in gi_listener.stdout

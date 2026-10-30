@@ -1,0 +1,156 @@
+---
+- name: Load home and patch catalog
+  ansible.builtin.import_playbook: tasks/load_home.yml
+
+- name: Run database pre-checks on every node
+  hosts: home_nodes
+  become: true
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Prepare node run directories
+      ansible.builtin.import_tasks: tasks/run_setup.yml
+  tasks:
+    - name: Execute database pre-check stage
+      block:
+        - name: Run common operating system checks
+          ansible.builtin.include_role:
+            name: common_os_checks
+        - name: Stage patch bundles
+          ansible.builtin.include_role:
+            name: stage_patch
+        - name: Run database pre-checks
+          ansible.builtin.include_role:
+            name: db_prechecks
+      rescue:
+        - name: Mark database pre-check failed
+          ansible.builtin.set_fact:
+            report_status: FAILED
+        - name: Notify database pre-check failure
+          ansible.builtin.include_role:
+            name: notify
+          vars:
+            notify_status: FAILED
+            notify_message: "Database pre-check failed for {{ target_home }} on {{ inventory_hostname }}."
+        - name: Stop after database pre-check failure
+          ansible.builtin.fail:
+            msg: Database pre-check failed.
+      always:
+        - name: Write database pre-check report
+          ansible.builtin.include_role:
+            name: reporting
+          vars:
+            stage_name: precheck_db
+
+- name: Patch database binaries one node at a time
+  hosts: home_nodes
+  become: true
+  serial: "{{ rdbms_batch | default(1) }}"
+  max_fail_percentage: 0
+  any_errors_fatal: true
+  tasks:
+    - name: Execute binary patch batch
+      block:
+        - name: Back up database home
+          ansible.builtin.include_role:
+            name: backup_home
+          when: mode == 'patch'
+        - name: Apply database home binaries
+          ansible.builtin.include_role:
+            name: rdbms_patch
+          vars:
+            rdbms_phase: binaries
+          when: mode == 'patch'
+      rescue:
+        - name: Mark binary batch failed
+          ansible.builtin.set_fact:
+            report_status: FAILED
+        - name: Notify binary batch failure
+          ansible.builtin.include_role:
+            name: notify
+          vars:
+            notify_status: FAILED
+            notify_message: "RDBMS binary patch failed for {{ target_home }} on {{ inventory_hostname }}."
+        - name: Stop after binary batch failure
+          ansible.builtin.fail:
+            msg: RDBMS binary patch batch failed.
+      always:
+        - name: Write binary batch report
+          ansible.builtin.include_role:
+            name: reporting
+          vars:
+            stage_name: rdbms_binaries
+
+- name: Run datapatch once after binary patching
+  hosts: home_nodes
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Execute datapatch phase
+      block:
+        - name: Apply SQL patch changes
+          ansible.builtin.include_role:
+            name: rdbms_patch
+          vars:
+            rdbms_phase: datapatch
+          when: mode == 'patch'
+      rescue:
+        - name: Mark datapatch failed
+          ansible.builtin.set_fact:
+            report_status: FAILED
+        - name: Notify datapatch failure
+          ansible.builtin.include_role:
+            name: notify
+          vars:
+            notify_status: FAILED
+            notify_message: "Datapatch failed for {{ target_home }}."
+        - name: Stop after datapatch failure
+          ansible.builtin.fail:
+            msg: Datapatch phase failed.
+      always:
+        - name: Write datapatch report
+          ansible.builtin.include_role:
+            name: reporting
+          vars:
+            stage_name: rdbms_datapatch
+
+- name: Validate database homes on every node
+  hosts: home_nodes
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Execute post-validation
+      block:
+        - name: Validate database home
+          ansible.builtin.include_role:
+            name: post_validation
+          when: mode == 'patch'
+      rescue:
+        - name: Mark post-validation failed
+          ansible.builtin.set_fact:
+            report_status: FAILED
+        - name: Notify post-validation failure
+          ansible.builtin.include_role:
+            name: notify
+          vars:
+            notify_status: FAILED
+            notify_message: "RDBMS post-validation failed for {{ target_home }} on {{ inventory_hostname }}."
+        - name: Stop after post-validation failure
+          ansible.builtin.fail:
+            msg: RDBMS post-validation failed.
+      always:
+        - name: Write post-validation report
+          ansible.builtin.include_role:
+            name: reporting
+          vars:
+            stage_name: rdbms_post_validation
+
+- name: Notify successful database workflow completion
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Send completion notification
+      ansible.builtin.include_role:
+        name: notify
+      vars:
+        notify_status: COMPLETED
+        notify_message: "RDBMS workflow completed for {{ target_home }} ({{ change_ref }})."

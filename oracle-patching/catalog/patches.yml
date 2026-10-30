@@ -1,0 +1,14 @@
+---
+patches:
+  PATCH_ID_GI_RU:
+    description: Placeholder Oracle Grid Infrastructure Release Update
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    min_opatch: "12.2.0.1.44"
+  PATCH_ID_RU:
+    description: Placeholder Oracle Database Release Update
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    min_opatch: "12.2.0.1.44"
+  PATCH_ID_OJVM:
+    description: Placeholder Oracle Java VM patch
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    min_opatch: "12.2.0.1.44"

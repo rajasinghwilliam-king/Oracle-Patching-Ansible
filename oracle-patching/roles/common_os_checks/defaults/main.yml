@@ -1,0 +1,25 @@
+---
+required_kernel: "4.18.0"
+os_certified:
+  - RedHat 8
+  - OracleLinux 8
+  - RedHat 9
+  - OracleLinux 9
+required_packages:
+  - binutils
+  - glibc
+  - libaio
+  - ksh
+space_checks:
+  - path: "{{ home.home_path }}"
+    min_gb: "{{ home.min_free_gb.home }}"
+    check_id: PC-04
+  - path: "{{ stage_root }}"
+    min_gb: "{{ home.min_free_gb.stage }}"
+    check_id: PC-05
+  - path: /tmp
+    min_gb: "{{ home.min_free_gb.tmp }}"
+    check_id: PC-06
+  - path: "{{ backup_root }}"
+    min_gb: "{{ home.min_free_gb.backup }}"
+    check_id: PC-07

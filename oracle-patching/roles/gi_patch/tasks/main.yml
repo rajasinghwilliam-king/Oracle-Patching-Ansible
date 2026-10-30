@@ -1,0 +1,51 @@
+---
+- name: Check GI apply completion marker
+  ansible.builtin.stat:
+    path: "{{ run_state_dir }}/gi_apply.done"
+  register: gi_apply_marker
+  run_once: true
+
+- name: Inspect GI inventory before applying
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -detail]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_apply_inventory
+  changed_when: false
+  run_once: true
+  when: not gi_apply_marker.stat.exists
+
+- name: Apply GI release update
+  ansible.builtin.command:
+    argv: >-
+      {{ [home.home_path ~ '/OPatch/opatchauto', 'apply',
+      run_stage_dir ~ '/' ~ home.patch_ids.gi_ru, '-oh', home.home_path] +
+      (['-nonrolling'] if not (home.rolling | bool) else []) }}
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_apply_result
+  async: 14400
+  poll: 60
+  run_once: true
+  changed_when: gi_apply_result.rc == 0
+  when:
+    - not gi_apply_marker.stat.exists
+    - home.patch_ids.gi_ru not in gi_apply_inventory.stdout
+
+- name: Save GI patch output
+  ansible.builtin.copy:
+    content: "{{ gi_apply_result.stdout | default('Patch already present or run marker exists.') }}\n{{ gi_apply_result.stderr | default('') }}"
+    dest: "{{ run_dir }}/tools/opatchauto_apply.log"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  run_once: true
+
+- name: Write GI apply completion marker
+  ansible.builtin.copy:
+    content: "{{ run_id_eff }}\n"
+    dest: "{{ run_state_dir }}/gi_apply.done"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  run_once: true

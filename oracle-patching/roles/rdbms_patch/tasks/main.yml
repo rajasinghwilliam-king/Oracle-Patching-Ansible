@@ -1,0 +1,138 @@
+---
+- name: Check RDBMS phase marker
+  ansible.builtin.stat:
+    path: "{{ run_state_dir }}/{{ 'binaries_' ~ inventory_hostname ~ '.done' if rdbms_phase == 'binaries' else 'datapatch.done' }}"
+  register: rdbms_phase_marker
+
+- name: Apply RDBMS binaries on this node
+  when:
+    - rdbms_phase == 'binaries'
+    - not rdbms_phase_marker.stat.exists
+  block:
+    - name: Inspect RDBMS inventory
+      ansible.builtin.command:
+        argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -detail]
+      become_user: "{{ home.owner }}"
+      environment: "{{ oracle_env }}"
+      register: rdbms_inventory
+      changed_when: false
+
+    - name: Stop database services with drain timeout
+      ansible.builtin.command:
+        argv:
+          - srvctl
+          - stop
+          - service
+          - -db
+          - "{{ item }}"
+          - -service
+          - "{{ home.app_service }}"
+          - -node
+          - "{{ inventory_hostname }}"
+          - -drain_timeout
+          - "{{ drain_timeout_sec | string }}"
+      become_user: "{{ home.owner }}"
+      loop: "{{ home.databases }}"
+      changed_when: true
+
+    - name: Stop local database instances
+      ansible.builtin.command:
+        argv: [srvctl, stop, instance, -db, "{{ item.db }}", -instance, "{{ item.inst }}", -stopoption, IMMEDIATE]
+      become_user: "{{ home.owner }}"
+      loop: "{{ db_pairs }}"
+      changed_when: true
+
+    - name: Apply patches not already in inventory
+      ansible.builtin.command:
+        argv: ["{{ home.home_path }}/OPatch/opatch", apply, -silent]
+      args:
+        chdir: "{{ run_stage_dir }}/{{ item.value }}"
+      become_user: "{{ home.owner }}"
+      environment: "{{ oracle_env }}"
+      loop: "{{ home.patch_ids | dict2items }}"
+      register: rdbms_apply_results
+      async: 7200
+      poll: 60
+      changed_when: rdbms_apply_results.rc == 0
+      when: item.value not in rdbms_inventory.stdout
+
+    - name: Start local database instances
+      ansible.builtin.command:
+        argv: [srvctl, start, instance, -db, "{{ item.db }}", -instance, "{{ item.inst }}"]
+      become_user: "{{ home.owner }}"
+      loop: "{{ db_pairs }}"
+      changed_when: true
+
+    - name: Verify local database instances are running
+      ansible.builtin.command:
+        argv: [srvctl, status, instance, -db, "{{ item.db }}", -instance, "{{ item.inst }}"]
+      become_user: "{{ home.owner }}"
+      loop: "{{ db_pairs }}"
+      register: rdbms_instance_status
+      changed_when: false
+      failed_when: rdbms_instance_status.rc != 0 or 'is running' not in rdbms_instance_status.stdout
+
+    - name: Start database services
+      ansible.builtin.command:
+        argv: [srvctl, start, service, -db, "{{ item }}", -service, "{{ home.app_service }}"]
+      become_user: "{{ home.owner }}"
+      loop: "{{ home.databases }}"
+      changed_when: true
+
+    - name: Write binary patch completion marker
+      ansible.builtin.copy:
+        content: "{{ run_id_eff }}\n"
+        dest: "{{ run_state_dir }}/binaries_{{ inventory_hostname }}.done"
+        owner: "{{ home.owner }}"
+        group: "{{ oracle_group }}"
+        mode: "0640"
+
+- name: Run datapatch once per selected database
+  when:
+    - rdbms_phase == 'datapatch'
+    - not rdbms_phase_marker.stat.exists
+  block:
+    - name: Run datapatch
+      ansible.builtin.command:
+        argv: ["{{ home.home_path }}/OPatch/datapatch", -verbose]
+      become_user: "{{ home.owner }}"
+      environment: "{{ oracle_env | combine({'ORACLE_SID': item ~ (node_index | string if home.rac | default(false) else '')}) }}"
+      loop: "{{ home.databases }}"
+      register: datapatch_results
+      run_once: true
+      changed_when: datapatch_results.rc == 0
+
+    - name: Save datapatch output
+      ansible.builtin.copy:
+        content: "{{ item.stdout }}\n{{ item.stderr }}"
+        dest: "{{ run_dir }}/sql/datapatch_{{ item.item }}.log"
+        owner: "{{ home.owner }}"
+        group: "{{ oracle_group }}"
+        mode: "0640"
+      loop: "{{ datapatch_results.results }}"
+      run_once: true
+
+    - name: Recompile invalid objects
+      ansible.builtin.command:
+        argv:
+          - "{{ home.home_path }}/bin/sqlplus"
+          - -S
+          - -L
+          - / as sysdba
+          - "@{{ home.home_path }}/rdbms/admin/utlrp.sql"
+      become_user: "{{ home.owner }}"
+      environment: "{{ oracle_env | combine({'ORACLE_SID': item ~ (node_index | string if home.rac | default(false) else '')}) }}"
+      loop: "{{ home.databases }}"
+      register: utlrp_result
+      run_once: true
+      changed_when: utlrp_result.rc == 0
+      when: recompile_invalid | bool
+
+    - name: Write datapatch completion marker
+      ansible.builtin.copy:
+        content: "{{ run_id_eff }}\n"
+        dest: "{{ run_state_dir }}/datapatch.done"
+        owner: "{{ home.owner }}"
+        group: "{{ oracle_group }}"
+        mode: "0640"
+      run_once: true

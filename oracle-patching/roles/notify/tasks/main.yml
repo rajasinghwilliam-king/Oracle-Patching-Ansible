@@ -1,0 +1,28 @@
+---
+- name: Send ChatOps notification when configured
+  ansible.builtin.uri:
+    url: "{{ chatops_webhook }}"
+    method: POST
+    body_format: json
+    body:
+      status: "{{ notify_status }}"
+      message: "{{ notify_message }}"
+      change_ref: "{{ change_ref | default('') }}"
+    status_code: [200, 202, 204]
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: chatops_webhook | default('') | length > 0
+
+- name: Send email notification when recipients are configured
+  community.general.mail:
+    host: "{{ smtp_host }}"
+    from: "{{ mail_sender }}"
+    to: "{{ notify_list | join(',') }}"
+    subject: "Oracle patch {{ notify_status }}: {{ target_home | default('workflow') }}"
+    body: "{{ notify_message }}"
+  delegate_to: localhost
+  become: false
+  when:
+    - notify_list | default([]) | length > 0
+    - smtp_host | default('') | length > 0

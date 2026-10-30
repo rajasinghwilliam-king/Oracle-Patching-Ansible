@@ -1,0 +1,45 @@
+---
+- name: Create patch staging directory
+  ansible.builtin.file:
+    path: "{{ run_stage_dir }}"
+    state: directory
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0775"
+
+  # TODO: Automate OPatch self-update from the staged bundle.
+- name: Copy patch bundles from the repository
+  ansible.builtin.copy:
+    src: "{{ bundle_repo }}/{{ item.value }}.zip"
+    dest: "{{ run_stage_dir }}/{{ item.value }}.zip"
+    remote_src: true
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  loop: "{{ home.patch_ids | dict2items }}"
+
+- name: Calculate staged bundle checksums
+  ansible.builtin.stat:
+    path: "{{ run_stage_dir }}/{{ item.value }}.zip"
+    checksum_algorithm: sha256
+  loop: "{{ home.patch_ids | dict2items }}"
+  register: staged_bundle_stats
+
+- name: "PC-14 Verify staged bundle checksums"
+  ansible.builtin.assert:
+    that:
+      - item.stat.checksum == patch_catalog.patches[item.item.value].sha256
+    fail_msg: "Checksum mismatch for patch bundle {{ item.item.value }}."
+  loop: "{{ staged_bundle_stats.results }}"
+
+- name: Unpack patch bundles for analysis
+  ansible.builtin.unarchive:
+    src: "{{ run_stage_dir }}/{{ item.value }}.zip"
+    dest: "{{ run_stage_dir }}"
+    remote_src: true
+    creates: "{{ run_stage_dir }}/{{ item.value }}"
+  loop: "{{ home.patch_ids | dict2items }}"
+
+- name: Record staging scope and OPatch prerequisite
+  ansible.builtin.set_fact:
+    stage_warnings: "{{ stage_warnings | default([]) + ['Staging changes no Oracle home. OPatch self-update is not automated.'] }}"

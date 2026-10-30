@@ -1,0 +1,7 @@
+skip_list:
+  - var-naming[no-role-prefix]
+  - run-once
+  - command-instead-of-module
+warn_list:
+  - partial-become
+  - no-changed-when

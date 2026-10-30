@@ -1,0 +1,171 @@
+---
+- name: Capture post-patch inventory
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/OPatch/opatch", lsinventory, -detail]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: post_inventory
+  changed_when: false
+
+- name: Save post-patch inventory
+  ansible.builtin.copy:
+    content: "{{ post_inventory.stdout }}\n"
+    dest: "{{ run_dir }}/inventory/inventory_post_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+
+- name: "PV-01 Assert target patches are present"
+  ansible.builtin.assert:
+    that:
+      - item.value in post_inventory.stdout
+    fail_msg: "Patch {{ item.value }} is missing from {{ inventory_hostname }} inventory."
+  loop: "{{ home.patch_ids | dict2items }}"
+
+- name: Extract sorted patch set for cluster comparison
+  ansible.builtin.set_fact:
+    post_patch_set: "{{ post_inventory.stdout | regex_findall('Patch\\s+([0-9]+)\\s*:') | sort }}"
+
+- name: "PV-02 Assert patch set is identical across nodes"
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].post_patch_set == post_patch_set
+  loop: "{{ ansible_play_hosts }}"
+  run_once: true
+
+- name: "PV-08 Verify GI cluster online"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/crsctl", check, cluster, -all]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: post_gi_cluster
+  changed_when: false
+  failed_when: post_gi_cluster.rc != 0 or 'is online' not in post_gi_cluster.stdout
+  when: home.type == 'gi'
+
+- name: "PV-09 Verify ASM disk groups mounted"
+  ansible.builtin.shell: |
+    set -o pipefail
+    {{ home.home_path }}/bin/asmcmd lsdg | awk 'NR > 1 && $1 != "MOUNTED" { count++ } END { print count + 0 }'
+  args:
+    executable: /bin/bash
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env | combine({'ORACLE_SID': '+ASM' ~ (node_index | string)}) }}"
+  register: post_asm_status
+  changed_when: false
+  failed_when: post_asm_status.rc != 0 or post_asm_status.stdout | int != 0
+  when: home.type == 'gi'
+
+- name: "PV-12 Run cluster health check"
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/bin/cluvfy"
+      - comp
+      - healthcheck
+      - -collect
+      - cluster
+      - -html
+  args:
+    chdir: "{{ run_dir }}/tools"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: gi_healthcheck
+  run_once: true
+  changed_when: gi_healthcheck.rc == 0
+  failed_when: gi_healthcheck.rc != 0
+  when: home.type == 'gi'
+
+- name: Run database postcheck SQL per instance
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/bin/sqlplus"
+      - -S
+      - -L
+      - / as sysdba
+      - "@{{ run_stage_dir }}/sql/db_post_checks.sql"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env | combine({'ORACLE_SID': item.inst}) }}"
+  loop: "{{ db_pairs }}"
+  register: db_postchecks
+  changed_when: false
+  failed_when: db_postchecks.rc != 0 or 'ORA-' in db_postchecks.stdout or 'SP2-' in db_postchecks.stdout
+  when: home.type == 'rdbms'
+
+- name: Parse database postcheck values
+  ansible.builtin.set_fact:
+    db_post_lines: "{{ (db_post_lines | default({})) | combine({item.item.inst: item.stdout_lines | parse_sql_kv}) }}"
+  loop: "{{ db_postchecks.results | default([]) }}"
+  when: home.type == 'rdbms'
+
+- name: "PV-03..07 Assert database postcheck results"
+  ansible.builtin.assert:
+    that:
+      - db_post_lines[item.inst].DB_STATE[0] == 'READ WRITE'
+      - db_post_lines[item.inst].INSTANCE[1] == 'OPEN'
+      - db_post_lines[item.inst].INVALID_AFTER[0] | int <= invalid_baseline[item.inst] | int
+      - db_post_lines[item.inst].REGISTRY_BAD[0] | int == 0
+      - db_post_lines[item.inst].SQLPATCH_ERR[0] | int == 0
+    fail_msg: "Post-patch database validation failed for {{ item.inst }}."
+  loop: "{{ db_pairs }}"
+  when: home.type == 'rdbms'
+
+- name: Save database postcheck output
+  ansible.builtin.copy:
+    content: "{{ item.stdout }}\n"
+    dest: "{{ run_dir }}/sql/db_post_{{ item.item.inst }}_{{ inventory_hostname }}.txt"
+    owner: "{{ home.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  loop: "{{ db_postchecks.results | default([]) }}"
+  when: home.type == 'rdbms'
+
+- name: "PV-10 Verify database listener status"
+  ansible.builtin.command:
+    argv: ["{{ home.home_path }}/bin/lsnrctl", status]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: post_listener
+  changed_when: false
+  failed_when: post_listener.rc != 0 or 'TNS-' in post_listener.stdout
+  when: home.type == 'rdbms'
+
+- name: "PV-11 Verify application service status"
+  ansible.builtin.command:
+    argv: [srvctl, status, service, -db, "{{ item }}", -service, "{{ home.app_service }}"]
+  become_user: "{{ home.owner }}"
+  loop: "{{ home.databases | default([]) }}"
+  register: post_service_status
+  changed_when: false
+  failed_when: post_service_status.rc != 0 or 'is running' not in post_service_status.stdout
+  when: home.type == 'rdbms'
+
+- name: "PV-14 Verify Data Guard broker status"
+  ansible.builtin.command:
+    argv: [dgmgrl, -silent, /, show, configuration]
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: post_dg_status
+  changed_when: false
+  failed_when: post_dg_status.rc != 0 or 'SUCCESS' not in post_dg_status.stdout
+  when:
+    - home.type == 'rdbms'
+    - home.dg_protected | default(false)
+
+- name: Run credentialed application smoke test
+  ansible.builtin.command:
+    argv:
+      - "{{ home.home_path }}/bin/sqlplus"
+      - -S
+      - -L
+      - "{{ smoke_user }}/{{ smoke_password }}@{{ home.app_service }}"
+      - "@{{ run_stage_dir }}/sql/smoke_test.sql"
+  become_user: "{{ home.owner }}"
+  environment: "{{ oracle_env }}"
+  register: smoke_result
+  no_log: true
+  run_once: true
+  changed_when: false
+  failed_when: smoke_result.rc != 0 or 'SMOKE|CONNECT_OK' not in smoke_result.stdout
+  when:
+    - home.type == 'rdbms'
+    - smoke_user | default('') | length > 0

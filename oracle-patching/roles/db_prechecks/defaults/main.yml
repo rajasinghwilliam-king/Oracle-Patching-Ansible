@@ -1,0 +1,7 @@
+---
+max_active_sessions: "{{ home.thresholds.max_active_sessions }}"
+max_invalid_objects: "{{ home.thresholds.max_invalid_objects }}"
+tablespace_max_used_pct: "{{ home.thresholds.tablespace_max_used_pct }}"
+fra_max_used_pct: "{{ home.thresholds.fra_max_used_pct }}"
+max_apply_lag_seconds: "{{ home.thresholds.max_apply_lag_seconds }}"
+max_backup_age_hours: "{{ home.thresholds.max_backup_age_hours }}"
